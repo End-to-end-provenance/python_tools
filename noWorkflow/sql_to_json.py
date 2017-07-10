@@ -3,6 +3,7 @@ import json
 import ast
 import pandas
 import os
+import subprocess
 
 def get_info_from_sql(input_db_file, run_num):
     """ queries noWorkflow sql database """
@@ -260,7 +261,7 @@ def add_file(result, files, d_count, e_count, current_p, s, outfiles, first_step
 
     return d_count, e_count
 
-def add_data_edge(result, s, d_count, e_count, current_p, script_name):
+def add_data_edge(result, s, d_count, e_count, current_p, script_name, data_dir):
     """ makes intermediate data node if process had return value
     if dataframe, make a snapshot csv
     else, make a normal data node as a string """
@@ -274,24 +275,24 @@ def add_data_edge(result, s, d_count, e_count, current_p, script_name):
     for i in range (0, len(keys)):
         current_data_node[keys[i]] = values[i]
 
-    # -------STRING FORMATTING FOR PRINTING---------
-    # Cases to test:
-    # full df
-    # full labeled df
-    # labelled subset
-    # unlabelled subset
-    # labelled subset len >1
-    # unlabelled subset len >1
-    # Check all if statements with more script examples
-
     df = None
 
     if s[3]!=None:
+
         y = s[3].split("\n")
 
         # use first line and last line to figure out formatting
         first_line = y[0].strip()
         last_line = y[-1].strip()
+
+        second_line_list = None
+        # use len of first and second line to figure out formatting
+        try:
+            second_line = y[1].strip()
+            second_line_list = second_line.split()
+        except:
+            # print("it only has 1 line")
+            pass
 
         # convert to df if full or subsetted df
 
@@ -313,26 +314,36 @@ def add_data_edge(result, s, d_count, e_count, current_p, script_name):
                 line = l.split()[1:]
                 data.append(line)
             df = pandas.DataFrame(data, columns = col_names)
+        elif "rows" in last_line:
+            # TO DO
+            col_names = first_line.split()
+            data = []
+            for l in y[1:-2]:
+                line = l.split()
+                data.append(line)
+            df = pandas.DataFrame(data, columns = col_names)
 
-        else: # integer value or different type of return statement
-            # debug or return as string
-            print("something else, need to debug or just return as a string")
+        elif second_line_list != None:
+            col_names = first_line.split() # if no col_name indicators
+            if len(second_line_list) == 1 + len(col_names):
+                data = []
+                for l in y[1:]:
+                    line = l.split()
+                    data.append(line[1:])
+                df = pandas.DataFrame(data)
 
     if isinstance(df, pandas.core.frame.DataFrame):
         current_data_node['rdt:type'] = "Snapshot"
         # make dir if it doesn't exist
         filename = "line" + str(s[4]) + "data.csv"
         script = script_name.split("/")[-1].strip(".py")
-        # TO DO: relative path
-        directory = "/Users/jen/Desktop/newNow/data/intermediate_values_of_" + script + "_data/"
+        directory = data_dir + "/intermediate_values_of_" + script + "_data/"
         if not os.path.exists(directory):
             os.makedirs(directory)
         path = directory + filename
         #write to csv
         df.to_csv(path)
-        # TO DO: relative path
-        # current_data_node['rdt:value'] = path
-        current_data_node['rdt:value'] = "../data/intermediate_values_of_testJ_data/" + filename
+        current_data_node['rdt:value'] = "../data/intermediate_values_of_" + script + "_data/" + filename
     else:
         current_data_node['rdt:type'] = "Data"
         if s[3]!=None:
@@ -391,7 +402,7 @@ def int_data_to_process(dkey_string, process_string, e_count, result):
 
     return e_count
 
-def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict):
+def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir):
     """ uses the information from the database
     to make a dictionary compatible with Prov-JSON format
 
@@ -482,7 +493,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
 
         # if process node has return statement, make intermediate data node and edges
         if s[3] != "None":
-            d_count, e_count, dkey_string = add_data_edge(result, s, d_count, e_count, current_p, script_name)
+            d_count, e_count, dkey_string = add_data_edge(result, s, d_count, e_count, current_p, script_name, data_dir)
             int_values.append(s[3])
             int_dkey_strings.append(dkey_string)
 
@@ -506,7 +517,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
 
     # after all steps in script done
     # add finish nodes (both loops and functions)
-    #and informs edges for the rest of the process_stack
+    # and informs edges for the rest of the process_stack
     while len(process_stack)>1:
         func_line = process_stack.pop()
         try: # get the func name
@@ -555,14 +566,59 @@ def write_json(dictionary, output_json_file):
     with open(output_json_file, 'w') as outfile:
         json.dump(dictionary, outfile, default=lambda temp: json.loads(temp.to_json()))
 
-def link_DDGs(trial_num_list, input_db_file, output_json_file):
+def now_run(script_path):
+    command = ["now", "run", script_path]
+
+    sshproc = subprocess.call(command)
+
+    stdout_value, stderr_value = sshproc.communicate('through stdin to stdout')
+
+def get_paths(script_path):
+    """ uses os and sys to get the paths to call link_DDGs
+    used when the user inports sql_to_json in their script.py
+    and then runs python script.py or now run script.py while in the scripts dir
+    produces another directory, python_prov, in the project_dir,
+    where prov-JSON files are stored
+
+    input script_path is __file__, where this is called from the script.py
+
+    used by get_prov(script_path)"""
+
+    # call this file while in the scripts dir
+    scripts_dir = os.getcwd()
+    noworkflow_db = ".noworkflow/db.sqlite"
+    input_db_file = os.path.join(scripts_dir, noworkflow_db)
+
+    path = script_path.split(".")
+    file_name = path[0]
+    json_name = file_name + ".json"
+
+    project_dir = "/".join(scripts_dir.split("/")[:-1])
+    prov_dir = os.path.join(project_dir, "python_prov")
+
+    data_dir = os.path.join(project_dir, "data")
+
+    if not os.path.exists(prov_dir):
+        os.makedirs(prov_dir)
+
+    output_json_file = os.path.join(prov_dir, json_name)
+
+    return input_db_file, output_json_file, data_dir
+
+def get_trial_nums():
+    """ used by get_prov(script_path) """
+    print("TO DO")
+
+def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir):
     """ input: db_file generated by noworkflow
     target path where the Prov-JSON file will be written
     and a list of trial numbers that will be linked together into a DDG
     where trial numbers correspond to individual scripts stored in the noworkflow database
+    If only 1 trial_num is provided, a single script is analyzed
 
     output: prov-json file that can be opened in DDG Explorer
-    """
+
+    used by get_prov(script_path) """
 
     # initialize variables that will carry over from 1 script to the next
     p_count, d_count, e_count = 1, 1, 1
@@ -573,23 +629,30 @@ def link_DDGs(trial_num_list, input_db_file, output_json_file):
     for trial_num in trial_num_list:
         script_steps, files, func_ends, end_funcs, script_name = get_info_from_sql(input_db_file, trial_num)
         loop_dict = get_loop_locations(script_name)
-        result, p_count, d_count, e_count, outfiles, finish_node = make_dict(script_steps, files, input_db_file, trial_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict)
+        result, p_count, d_count, e_count, outfiles, finish_node = make_dict(script_steps, files, input_db_file, trial_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir)
 
     # Write to file
     write_json(result, output_json_file)
 
+def get_prov(script_path):
+    """ Wrapper function to get python provenance
+    input script_path is __file__,
+    when called from a python script that imports sql_to_json """
+
+    now_run(script_path)
+    input_db_file, output_json_file, data_dir = get_paths(script_path)
+    trial_num_list = get_trial_nums()
+    link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir)
+    # TO DO: open DDG Explorer automatically?
+
 def main():
 
-    # TO DO: how to get these paths?
     input_db_file = '/Users/jen/Desktop/newNow/scripts/.noworkflow/db.sqlite'
-    output_json_file = "/Users/jen/Desktop/newNow/results/J.json"
-
-    # TO DO: how to get these from now list, how to make sure they are in order?
-    trial_num_list = [13]
-
-    link_DDGs(trial_num_list, input_db_file, output_json_file)
-
-    # TO DO: how to open DDG Explorer automatically?
+    output_json_file = "/Users/jen/Desktop/newNow/results/drinks.json"
+    data_dir = "/Users/jen/Desktop/newNow/data"
+    trial_num_list = [33]
+    link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir)
+    # if called from here instead of from script.py, results put in results rather than in separate python prov dir
 
 if __name__ == "__main__":
     main()
