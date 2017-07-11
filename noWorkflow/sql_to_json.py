@@ -17,6 +17,14 @@ def get_info_from_sql(input_db_file, run_num):
     temp = temp[1]
     temp = temp.split(" ")
     script_name = temp[1]
+    try:
+        # if only the script_name and not the full path
+        x = script_name.split("/")[1]
+    except:
+        # get the full path from the db
+        c.execute('SELECT trial_id, name, value from environment_attr where trial_id = ? and name = "PWD" ', (run_num,))
+        temp = c.fetchone()
+        script_name = temp[2] + "/" + script_name
 
     # process nodes
     c.execute('SELECT trial_id, id, name, return_value, line from function_activation where trial_id = ?', (run_num,))
@@ -60,6 +68,14 @@ def get_info_from_sql(input_db_file, run_num):
     c.close()
 
     return script_steps, files, func_ends, end_funcs, script_name
+
+def get_script_line_dict(script_name):
+    """ keys = line_number, values = line """
+    script_line_dict = {}
+    with open(script_name) as f:
+        for i, line in enumerate(f):
+            script_line_dict[i+1]=line.strip()
+    return script_line_dict
 
 def get_defaults(script_name):
     """ sets default required fields for the Prov-JSON file, ie environment node
@@ -139,9 +155,7 @@ def add_end_node(result, p_count, name):
     return pkey_string, p_count
 
 def add_process(result, p_name, p_count, s, script_name, next_line):
-    """ adds process node and edge for each step in script_steps
-    chooses the most descriptive label for the node between:
-    noWorkflow default step label or the relevent line in the script"""
+    """ adds process node and edge for each step in script_steps """
 
     # defaults for all process nodes
     current_process_node = {}
@@ -149,11 +163,7 @@ def add_process(result, p_name, p_count, s, script_name, next_line):
     current_process_node["rdt:elapsedTime"] = "0.5"
     current_process_node["rdt:startLine"], current_process_node["rdt:endLine"] = str(s[4]), str(s[4])
 
-    # get most descriptive label and dependent properties
-    if s[2].startswith("__") or s[2]=="f" and next_line != "":
-        line_label = next_line.strip()
-    else:
-        line_label = s[2]
+    line_label = next_line.strip()
 
     current_process_node['rdt:name'] = line_label
     current_process_node["rdt:startCol"] = str(0)
@@ -184,9 +194,9 @@ def add_file_node(script, current_link_dict, d_count, result, data_dict):
     # set value/relative path according to file's parent directory
     try:
         if split_path_file[1] == "results":
-            current_file_node['rdt:value'] = script # if result/in results dir
+            current_file_node['rdt:value'] = current_link_dict['name']
         elif split_path_file[1] == "data":
-            current_file_node['rdt:value'] = "." + current_link_dict['name']
+            current_file_node['rdt:value'] = current_link_dict['name']
         else:
             # if not in data or results, put entire path
             current_file_node['rdt:value']= current_link_dict['name']
@@ -314,23 +324,104 @@ def add_data_edge(result, s, d_count, e_count, current_p, script_name, data_dir)
                 line = l.split()[1:]
                 data.append(line)
             df = pandas.DataFrame(data, columns = col_names)
-        elif "rows" in last_line:
-            # TO DO
-            col_names = first_line.split()
-            data = []
-            for l in y[1:-2]:
-                line = l.split()
-                data.append(line)
-            df = pandas.DataFrame(data, columns = col_names)
 
-        elif second_line_list != None:
-            col_names = first_line.split() # if no col_name indicators
-            if len(second_line_list) == 1 + len(col_names):
-                data = []
+        elif "rows" in last_line: #if last line == dimensions
+            col_names = []
+            data = []
+            num_cols = int(last_line.split()[3])
+
+            # separate data and col_names rows
+            for l in y[:-1]:
+                try:
+                    int(l.split()[0])
+                    data.append(l)
+                except:
+                    col_names.append(l.split())
+
+            # formatting col_names
+            for c in col_names:
+                if c[0]=="..":
+                    col_names.remove(c)
+                elif  "\\" in c:
+                    c.remove("\\")
+
+            final_col_names = []
+            for c in col_names:
+                for col in c:
+                    final_col_names.append(col)
+
+            # formatting data
+            first_line_dict = {}
+            for d in data:
+                temp = d.split()
+                if temp[0] in first_line_dict:
+                    for elt in temp[1:]:
+                        first_line_dict[temp[0]].append(elt)
+                else:
+                    first_line_dict[temp[0]] = temp[1:]
+
+            final_data = []
+            for elt in first_line_dict:
+                if len(first_line_dict[elt]) == num_cols:
+                    final_data.append(first_line_dict[elt])
+
+                # if easily visualized, keep it.
+                # TO DO: how to merge strings together, ie Trinidad & Tobago
+
+            df = pandas.DataFrame(final_data, columns = final_col_names)
+
+        elif second_line_list != None: # no other indicators available
+
+            data = []
+            final_data = []
+            col_names = first_line.split()
+
+            if "\\" in col_names:
+                # labelled cols, unlabelled rows
+                col_names.remove("\\")
+
+                # formatting col_names
                 for l in y[1:]:
-                    line = l.split()
-                    data.append(line[1:])
-                df = pandas.DataFrame(data)
+                    try:
+                        int(l.split()[0])
+                        data.append(l)
+                    except:
+                        # labelled cols, labelled rows
+                        # TO DO: when rows labelled with count, mean, std, etc.
+
+                        temp = l.split()
+                        for elt in temp:
+                            col_names.append(elt)
+
+                num_cols = len(col_names)
+
+                # formatting data
+                first_line_dict = {}
+                for d in data:
+                    temp = d.split()
+                    if temp[0] in first_line_dict:
+                        for elt in temp[1:]:
+                            first_line_dict[temp[0]].append(elt)
+                    else:
+                        first_line_dict[temp[0]] = temp[1:]
+
+                final_data = []
+                for elt in first_line_dict:
+                    if len(first_line_dict[elt]) == num_cols:
+                        final_data.append(first_line_dict[elt])
+
+            else:
+                # unlabelled cols + rows
+                if len(second_line_list) == 1 + len(col_names):
+                    final_data = []
+                    for l in y[1:]:
+                        line = l.split()
+                        final_data.append(line[1:])
+
+            df = pandas.DataFrame(final_data)
+            # df initialization failed, reset it to None so that a string is printed instead of an empty df
+            if df.empty:
+                df = None
 
     if isinstance(df, pandas.core.frame.DataFrame):
         current_data_node['rdt:type'] = "Snapshot"
@@ -345,11 +436,12 @@ def add_data_edge(result, s, d_count, e_count, current_p, script_name, data_dir)
         df.to_csv(path)
         current_data_node['rdt:value'] = "../data/intermediate_values_of_" + script + "_data/" + filename
     else:
-        current_data_node['rdt:type'] = "Data"
-        if s[3]!=None:
-            current_data_node['rdt:value'] = s[3]
-        else:
-            current_data_node['rdt:value'] = "None"
+        # current_data_node['rdt:type'] = "Data"
+        # if s[3]!=None:
+        #     current_data_node['rdt:value'] = s[3]
+        # else:
+        #     current_data_node['rdt:value'] = "None"
+        return d_count, e_count, ""
 
     # add data node
     dkey_string = "d" + str(d_count)
@@ -402,7 +494,7 @@ def int_data_to_process(dkey_string, process_string, e_count, result):
 
     return e_count
 
-def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir):
+def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir, script_line_dict):
     """ uses the information from the database
     to make a dictionary compatible with Prov-JSON format
 
@@ -439,16 +531,11 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
     # iterate through each line in the script
     for i in range (1, len(script_steps)):
         s = script_steps[i]
+        print(s)
 
         # get the line of the script
-        next_line=""
-        with open(script_name) as f:
-            # subtract 1 from s[4] because script_steps starts at [1] to avoid redundant start node
-            for i, line in enumerate(f):
-                if i == s[4]-1:
-                    next_line = line
-                elif i > s[4]-1:
-                    break
+        next_line = script_line_dict[s[4]]
+        print(next_line)
 
         # if loop has ended on current step, add finish node
         if len(loop_stack)>0 and s[4] >= loop_stack[-1]:
@@ -572,6 +659,7 @@ def now_run(script_path):
     sshproc = subprocess.call(command)
 
     stdout_value, stderr_value = sshproc.communicate('through stdin to stdout')
+    return trial_num
 
 def get_paths(script_path):
     """ uses os and sys to get the paths to call link_DDGs
@@ -589,25 +677,19 @@ def get_paths(script_path):
     noworkflow_db = ".noworkflow/db.sqlite"
     input_db_file = os.path.join(scripts_dir, noworkflow_db)
 
-    path = script_path.split(".")
-    file_name = path[0]
-    json_name = file_name + ".json"
-
     project_dir = "/".join(scripts_dir.split("/")[:-1])
-    prov_dir = os.path.join(project_dir, "python_prov")
-
     data_dir = os.path.join(project_dir, "data")
+    prov_dir = os.path.join(project_dir, "python_prov")
 
     if not os.path.exists(prov_dir):
         os.makedirs(prov_dir)
 
+    script_name = script_path.split("/")[-1].split(".")[0]
+    json_name = script_name + ".json"
+
     output_json_file = os.path.join(prov_dir, json_name)
 
     return input_db_file, output_json_file, data_dir
-
-def get_trial_nums():
-    """ used by get_prov(script_path) """
-    print("TO DO")
 
 def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir):
     """ input: db_file generated by noworkflow
@@ -629,30 +711,44 @@ def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir):
     for trial_num in trial_num_list:
         script_steps, files, func_ends, end_funcs, script_name = get_info_from_sql(input_db_file, trial_num)
         loop_dict = get_loop_locations(script_name)
-        result, p_count, d_count, e_count, outfiles, finish_node = make_dict(script_steps, files, input_db_file, trial_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir)
+        script_line_dict = get_script_line_dict(script_name)
+        result, p_count, d_count, e_count, outfiles, finish_node = make_dict(script_steps, files, input_db_file, trial_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir, script_line_dict)
 
     # Write to file
     write_json(result, output_json_file)
 
-def get_prov(script_path):
-    """ Wrapper function to get python provenance
-    input script_path is __file__,
-    when called from a python script that imports sql_to_json """
-
-    now_run(script_path)
+def get_prov(script_path, trial_num_list):
+    #trial_num = now_run(script_path)
     input_db_file, output_json_file, data_dir = get_paths(script_path)
-    trial_num_list = get_trial_nums()
     link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir)
-    # TO DO: open DDG Explorer automatically?
 
 def main():
 
-    input_db_file = '/Users/jen/Desktop/newNow/scripts/.noworkflow/db.sqlite'
-    output_json_file = "/Users/jen/Desktop/newNow/results/drinks.json"
-    data_dir = "/Users/jen/Desktop/newNow/data"
-    trial_num_list = [33]
-    link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir)
     # if called from here instead of from script.py, results put in results rather than in separate python prov dir
+    # workflows
+    # input_db_file = '/Users/jen/Desktop/newNow/scripts/.noworkflow/db.sqlite'
+    # output_json_file = "/Users/jen/Desktop/newNow/results/drinks_Tracer.json"
+    # data_dir = "/Users/jen/Desktop/newNow/data"
+    # trial_num_list = [33]
+    # link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir)
+
+    # single runs
+    # input_db_file = '/Users/jen/Desktop/newNow/scripts/.noworkflow/db.sqlite'
+    # output_json_file = "/Users/jen/Desktop/newNow/results/test1.json"
+    # data_dir = "/Users/jen/Desktop/newNow/data"
+    # trial_num_list = [37]
+    # link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir)
+
+    # get_prov("/Users/jen/Desktop/newNow/scripts/test1.py", [37])
+    # get_prov("/Users/jen/Desktop/newNow/scripts/test1f.py", [38])
+    # get_prov("/Users/jen/Desktop/newNow/scripts/test2.py", [40])
+
+    input_db_file = '/Users/jen/Desktop/newNow/scripts/.noworkflow/db.sqlite'
+    output_json_file = "/Users/jen/Desktop/newNow/results/test2f.json"
+    data_dir = "/Users/jen/Desktop/newNow/data"
+    trial_num_list = [42]
+    link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir)
+    # get_prov("/Users/jen/Desktop/newNow/scripts/test2f.py", [42])
 
 if __name__ == "__main__":
     main()
