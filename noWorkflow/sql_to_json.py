@@ -128,6 +128,7 @@ def add_start_node(result, step, p_count, next_line=None):
 
     pkey_string = "p" + str(p_count)
     prev_p = pkey_string
+
     p_count+=1
 
     # add node
@@ -236,6 +237,8 @@ def add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, ac
         outer_dict = {path_array[-1] : inner_dict}
         outfiles[first_step[2]] = outer_dict
 
+    return e_count
+
 def add_file(result, files, d_count, e_count, current_p, s, outfiles, first_step, activation_id_to_p_string, data_dict):
     """ uses files dict to add file nodes and access edges to the dictionary
     uses outfiles dict to check if file already exists from a previous script """
@@ -262,16 +265,36 @@ def add_file(result, files, d_count, e_count, current_p, s, outfiles, first_step
         if dkey_string == -1: # if not seen yet, add node
             d_count, dkey_string = add_file_node(path_array[-1], current_link_dict, d_count, result, data_dict)
         # add new dependent edge
-        add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
+        e_count = add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
 
     # if first script, add file nodes w/o checking prior existence
     else:
         d_count, dkey_string = add_file_node(path_array[-1], current_link_dict, d_count, result, data_dict)
-        add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
+        e_count = add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
 
     return d_count, e_count
 
-def add_data_edge(result, s, d_count, e_count, current_p, script_name, data_dir):
+def add_data_edge(d_count, e_count, current_p, current_data_node, result):
+    """  called by add_data_node """
+
+    # add data node
+    dkey_string = "d" + str(d_count)
+    d_count+=1
+    result["entity"][dkey_string] = current_data_node
+
+    # make edge
+    current_edge_node = {}
+    current_edge_node['prov:activity'] = current_p
+    current_edge_node['prov:entity'] = dkey_string
+
+    # add edge
+    e_string = "e" + str(e_count)
+    e_count+=1
+    result['wasGeneratedBy'][e_string] = current_edge_node
+
+    return d_count, e_count, dkey_string
+
+def add_data_node(result, s, d_count, e_count, current_p, script_name, data_dir):
     """ makes intermediate data node if process had return value
     if dataframe, make a snapshot csv
     else, make a normal data node as a string """
@@ -436,27 +459,10 @@ def add_data_edge(result, s, d_count, e_count, current_p, script_name, data_dir)
         df.to_csv(path)
         current_data_node['rdt:value'] = "../data/intermediate_values_of_" + script + "_data/" + filename
     else:
-        # current_data_node['rdt:type'] = "Data"
-        # if s[3]!=None:
-        #     current_data_node['rdt:value'] = s[3]
-        # else:
-        #     current_data_node['rdt:value'] = "None"
-        return d_count, e_count, ""
+        # if the return value is None, return same d_count and e_count
+        return d_count, e_count, None
 
-    # add data node
-    dkey_string = "d" + str(d_count)
-    d_count+=1
-    result["entity"][dkey_string] = current_data_node
-
-    # make edge
-    current_edge_node = {}
-    current_edge_node['prov:activity'] = current_p
-    current_edge_node['prov:entity'] = dkey_string
-
-    # add edge
-    e_string = "e" + str(e_count)
-    e_count+=1
-    result['wasGeneratedBy'][e_string] = current_edge_node
+    d_count, e_count, dkey_string = add_data_edge(d_count, e_count, current_p, current_data_node, result)
 
     return d_count, e_count, dkey_string
 
@@ -531,11 +537,9 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
     # iterate through each line in the script
     for i in range (1, len(script_steps)):
         s = script_steps[i]
-        print(s)
 
         # get the line of the script
         next_line = script_line_dict[s[4]]
-        print(next_line)
 
         # if loop has ended on current step, add finish node
         if len(loop_stack)>0 and s[4] >= loop_stack[-1]:
@@ -580,9 +584,12 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
 
         # if process node has return statement, make intermediate data node and edges
         if s[3] != "None":
-            d_count, e_count, dkey_string = add_data_edge(result, s, d_count, e_count, current_p, script_name, data_dir)
-            int_values.append(s[3])
-            int_dkey_strings.append(dkey_string)
+            d_count, e_count, dkey_string = add_data_node(result, s, d_count, e_count, current_p, script_name, data_dir)
+
+            # if return value and dkey_string exists, add info to data structures
+            if dkey_string != None:
+                int_values.append(s[3])
+                int_dkey_strings.append(dkey_string)
 
         # add_informs_edge between all process nodes
         e_count = add_informs_edge(result, prev_p, current_p, e_count)
@@ -614,6 +621,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
 
         # add the finish node and edge
         current_p, p_count = add_end_node(result, p_count, func_name)
+
         e_count = add_informs_edge(result, prev_p, current_p, e_count)
         prev_p = "p" + str(p_count-1)
 
@@ -724,14 +732,6 @@ def get_prov(script_path, trial_num_list):
 
 def main():
 
-    # if called from here instead of from script.py, results put in results rather than in separate python prov dir
-    # workflows
-    # input_db_file = '/Users/jen/Desktop/newNow/scripts/.noworkflow/db.sqlite'
-    # output_json_file = "/Users/jen/Desktop/newNow/results/drinks_Tracer.json"
-    # data_dir = "/Users/jen/Desktop/newNow/data"
-    # trial_num_list = [33]
-    # link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir)
-
     # single runs
     # input_db_file = '/Users/jen/Desktop/newNow/scripts/.noworkflow/db.sqlite'
     # output_json_file = "/Users/jen/Desktop/newNow/results/test1.json"
@@ -743,12 +743,25 @@ def main():
     # get_prov("/Users/jen/Desktop/newNow/scripts/test1f.py", [38])
     # get_prov("/Users/jen/Desktop/newNow/scripts/test2.py", [40])
 
+    # get_prov("/Users/jen/Desktop/newNow/scripts/test2f.py", [43])
+
+    # get_prov("/Users/jen/Desktop/newNow/scripts/testJ.py", [44])
+
+    # get_prov("/Users/jen/Desktop/newNow/scripts/testA.py", [7])
+
+    # get_prov("/Users/jen/Desktop/newNow/scripts/testB.py", [8])
+
+    # get_prov("/Users/jen/Desktop/newNow/scripts/testC.py", [9])
+    # get_prov("/Users/jen/Desktop/newNow/scripts/testD.py", [10])
+    # get_prov("/Users/jen/Desktop/newNow/scripts/testE.py", [11])
+
+    # if called from here instead of from script.py, results put in results rather than in separate python prov dir
+    # workflows
     input_db_file = '/Users/jen/Desktop/newNow/scripts/.noworkflow/db.sqlite'
-    output_json_file = "/Users/jen/Desktop/newNow/results/test2f.json"
+    output_json_file = "/Users/jen/Desktop/newNow/results/A-E.json"
     data_dir = "/Users/jen/Desktop/newNow/data"
-    trial_num_list = [42]
+    trial_num_list = [7, 8, 9, 10, 11]
     link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir)
-    # get_prov("/Users/jen/Desktop/newNow/scripts/test2f.py", [42])
 
 if __name__ == "__main__":
     main()
