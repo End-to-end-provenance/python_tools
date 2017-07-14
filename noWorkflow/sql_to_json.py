@@ -168,7 +168,7 @@ def add_process(result, p_name, p_count, s, script_name, current_line):
 
     return p_count, pkey_string
 
-def check_input_files_and_add(input_db_file, run_num, p_count, files):
+def check_input_files_and_add(input_db_file, run_num, p_count, files, s):
     """ if input file not detected bc of lacking "with open() as f" format
     detect input file by using db info
     makes sure that the string is a file/path
@@ -177,35 +177,31 @@ def check_input_files_and_add(input_db_file, run_num, p_count, files):
 
     db = sqlite3.connect(input_db_file, uri=True)
     c = db.cursor()
-    c.execute('SELECT trial_id, value, function_activation_id from object_value where trial_id = ? and function_activation_id = ?', (run_num,p_count-1))
-    # p_count -1 since we want the process node to be added either way, but p_count is incremented
+    c.execute('SELECT trial_id, value, function_activation_id, name from object_value where trial_id = ? and function_activation_id = ? and name = ?', (run_num, s[1], "filepath_or_buffer"))
     temp = c.fetchone()
-    filename = None
 
-    try:
-        if temp[1].startswith("'."): # if path, get file name
-            filename = temp[1].strip("'")
+    filename = temp[1].strip("'")
 
-            try: #find existing file from that line
-                files[p_count-2]['name']
-                # p_count-2 since incremented twice
-            except: # make new entry
-                temp_dict = {'hash': None, 'name': filename, 'mode': 'r'}
-                files[temp[2]]= temp_dict
-    except:
-        # if value is not a string, not a path. Do not add to files
-        pass
+    try: #find existing file from that line
+        # TO DO
+        files[p_count-2]['name']
+        # p_count-2 since incremented twice
+    except: # make new entry
+        temp_dict = {'hash': None, 'name': filename, 'mode': 'r'}
+        files[temp[2]]= temp_dict
 
 def check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_count, p_count, result, s, prev_p, script_name, data_dir, int_values):
     """ if to_csv does not have incoming data node bc of lacking recent assignment
     checks if intermediate value already exists in db and in result
     if not, adds node and edge """
 
+    initial_d_count = d_count
+
     db = sqlite3.connect(input_db_file, uri=True)
     c = db.cursor()
-    c.execute('SELECT trial_id, value, function_activation_id from object_value where trial_id = ? and function_activation_id = ?', (run_num, p_count-1, ))
-    # p_count -1 since we want the process node to be added either way, but p_count is incremented
+    c.execute('SELECT trial_id, value, function_activation_id, name from object_value where trial_id = ? and function_activation_id = ? and name = ?', (run_num, s[1], "self", ))
     temp = c.fetchone()
+
     try:
         if temp[1] in int_values:
             # if incoming value already exists, do not add anything
@@ -216,8 +212,13 @@ def check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_co
             lst[3]=temp[1]
             s = tuple(lst)
             d_count, e_count, dkey_string = add_data(result, s, d_count, e_count, prev_p, script_name, data_dir, to_csv = True)
+            # if d_count != initial_d_count:
+            #     print("it was okay, read to move on")
+            # else:
+            #     print("after a loop, redo")
             return d_count, e_count, dkey_string, s[3]
     except:
+        print("except")
         return d_count, e_count, None, None
 
 def add_file_node(script, current_link_dict, d_count, result, data_dict):
@@ -642,7 +643,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
             # special case checks
             if "pandas.read_csv" in current_line:
                 # if reading csv, ensure that input file is detected, even w/o "with open as f" syntax
-                check_input_files_and_add(input_db_file, run_num, p_count, files)
+                check_input_files_and_add(input_db_file, run_num, p_count, files, s)
 
             if "to_csv" in current_line:
                 d_count, e_count, dkey_string, int_value = check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_count, p_count, result, s, prev_p, script_name, data_dir, int_values)
