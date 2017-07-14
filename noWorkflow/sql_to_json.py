@@ -56,16 +56,19 @@ def get_info_from_sql(input_db_file, run_num):
     return script_steps, files, func_ends, end_funcs
 
 def get_script_line_dict(script_name):
-    """ keys = line_number, values = line """
+    """ keys = line_number, values = line
+    used for labelling the process nodes """
     script_line_dict = {}
+
     with open(script_name) as f:
         for i, line in enumerate(f):
             script_line_dict[i+1]=line.strip()
+
     return script_line_dict
 
 def get_defaults(script_name):
     """ sets default required fields for the Prov-JSON file, ie environment node
-    variable 'rdt:script' is the first script in the workflow.
+    variable 'rdt:script' is the script name or the first script in the workflow.
     """
     result, activity_d, environment_d = {}, {}, {}
 
@@ -82,7 +85,8 @@ def get_defaults(script_name):
     return result
 
 def add_informs_edge(result, prev_p, current_p, e_count):
-    """ adds informs edge between steps in the script or between script nodes """
+    """ adds informs edge between steps in the script or between script nodes
+    to ensure correct sequential layout of DDG """
 
     current_informs_edge = {}
     current_informs_edge['prov:informant'] = prev_p
@@ -113,9 +117,8 @@ def add_start_node(result, step, p_count, current_line=None):
         start_node_d['rdt:name'] = step[2]
 
     pkey_string = "p" + str(p_count)
-    prev_p = pkey_string
-
     p_count+=1
+    prev_p = pkey_string
 
     # add node
     result['activity'][pkey_string] = start_node_d
@@ -150,6 +153,7 @@ def add_process(result, p_name, p_count, s, script_name, current_line):
     current_process_node["rdt:elapsedTime"] = "0.5"
     current_process_node["rdt:startLine"], current_process_node["rdt:endLine"] = str(s[4]), str(s[4])
 
+    # use the corresponding line in script as the label
     line_label = current_line.strip()
 
     current_process_node['rdt:name'] = line_label
@@ -167,9 +171,10 @@ def add_process(result, p_name, p_count, s, script_name, current_line):
 def check_input_files_and_add(input_db_file, run_num, p_count, files):
     """ if input file not detected bc of lacking "with open() as f" format
     detect input file by using db info
-    makes sure that the string is a file/path, not a string value of an integer by using try: int()
+    makes sure that the string is a file/path
     if file/path: add to files dict
-    then add_file can be used as normally"""
+    then use add_file in make_dict """
+
     db = sqlite3.connect(input_db_file, uri=True)
     c = db.cursor()
     c.execute('SELECT trial_id, value, function_activation_id from object_value where trial_id = ? and function_activation_id = ?', (run_num,p_count-1))
@@ -178,17 +183,42 @@ def check_input_files_and_add(input_db_file, run_num, p_count, files):
     filename = None
 
     try:
-        if temp[1].startswith("'."):
+        if temp[1].startswith("'."): # if path, get file name
             filename = temp[1].strip("'")
 
-            try:
+            try: #find existing file from that line
                 files[p_count-2]['name']
                 # p_count-2 since incremented twice
-            except:
+            except: # make new entry
                 temp_dict = {'hash': None, 'name': filename, 'mode': 'r'}
                 files[temp[2]]= temp_dict
     except:
+        # if value is not a string, not a path. Do not add to files
         pass
+
+def check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_count, p_count, result, s, prev_p, script_name, data_dir, int_values):
+    """ if to_csv does not have incoming data node bc of lacking recent assignment
+    checks if intermediate value already exists in db and in result
+    if not, adds node and edge """
+
+    db = sqlite3.connect(input_db_file, uri=True)
+    c = db.cursor()
+    c.execute('SELECT trial_id, value, function_activation_id from object_value where trial_id = ? and function_activation_id = ?', (run_num, p_count-1, ))
+    # p_count -1 since we want the process node to be added either way, but p_count is incremented
+    temp = c.fetchone()
+    try:
+        if temp[1] in int_values:
+            # if incoming value already exists, do not add anything
+            return d_count, e_count, None, None
+        else:
+            # add data node
+            lst = list(s)
+            lst[3]=temp[1]
+            s = tuple(lst)
+            d_count, e_count, dkey_string = add_data(result, s, d_count, e_count, prev_p, script_name, data_dir, to_csv = True)
+            return d_count, e_count, dkey_string, s[3]
+    except:
+        return d_count, e_count, None, None
 
 def add_file_node(script, current_link_dict, d_count, result, data_dict):
     """ adds a file node, called by add_file """
@@ -204,7 +234,7 @@ def add_file_node(script, current_link_dict, d_count, result, data_dict):
 
     split_path_file = current_link_dict['name'].split("/")
     temp = current_link_dict['name'].strip('.')
-    # for consistency, stip of all leading .
+    # for consistency, stip all leading .
 
     # then, add 2 ..
     # set value/relative path according to file's parent directory
@@ -243,6 +273,7 @@ def add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, ac
     e_string = "e" + str(e_count)
     e_count+=1
 
+    # choose the correct category based on mode: r --> used, w --> wasGeneratedBy
     if current_link_dict['mode'] == "r":
         result['used'][e_string] = current_edge_node
     else:
@@ -279,62 +310,28 @@ def add_file(result, files, d_count, e_count, current_p, s, outfiles, first_step
 
         if dkey_string == -1: # if not seen yet, add node
             d_count, dkey_string = add_file_node(path_array[-1], current_link_dict, d_count, result, data_dict)
-        # add new dependent edge
+
+        # no matter if new or seen, add new dependent edge
         e_count = add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
 
-    # if first script, add file nodes w/o checking prior existence
+    # if first script, add file nodes w/o checking existence
     else:
         d_count, dkey_string = add_file_node(path_array[-1], current_link_dict, d_count, result, data_dict)
         e_count = add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
 
     return d_count, e_count
 
-def add_data_edge(d_count, e_count, current_p, current_data_node, result):
-    """  called by add_data_node """
-
-    # add data node
-    dkey_string = "d" + str(d_count)
-    d_count+=1
-    result["entity"][dkey_string] = current_data_node
-
-    # make edge
-    current_edge_node = {}
-    current_edge_node['prov:activity'] = current_p
-    current_edge_node['prov:entity'] = dkey_string
-
-    # add edge
-    e_string = "e" + str(e_count)
-    e_count+=1
-    result['wasGeneratedBy'][e_string] = current_edge_node
-
-    return d_count, e_count, dkey_string
-
-def add_data_node(result, s, d_count, e_count, current_p, script_name, data_dir):
-    """ makes intermediate data node if process had return value
-    if dataframe, make a snapshot csv
-    else, make a normal data node as a string """
-
-    # make data node
-    current_data_node = {}
-    current_data_node['rdt:name'] = "data"
-    current_data_node['rdt:scope'] = "R_GlobalEnv"
-    keys = ["rdt:fromEnv", "rdt:timestamp", "rdt:location"]
-    values = ["FALSE", "", ""]
-    for i in range (0, len(keys)):
-        current_data_node[keys[i]] = values[i]
-
+def get_data_frame(s):
+    """ tries to convert to data to df to save intermediate value and improve vis """
     df = None
-
     if s[3]!=None:
 
         y = s[3].split("\n")
-
-        # use first line and last line to figure out formatting
+        # figure out formatting using first line, last line, len(second_line)
         first_line = y[0].strip()
         last_line = y[-1].strip()
-
         second_line_list = None
-        # use len of first and second line to figure out formatting
+
         try:
             second_line = y[1].strip()
             second_line_list = second_line.split()
@@ -448,8 +445,7 @@ def add_data_node(result, s, d_count, e_count, current_p, script_name, data_dir)
                     if len(first_line_dict[elt]) == num_cols:
                         final_data.append(first_line_dict[elt])
 
-            else:
-                # unlabelled cols + rows
+            else: # unlabelled cols + rows
                 if len(second_line_list) == 1 + len(col_names):
                     final_data = []
                     for l in y[1:]:
@@ -457,9 +453,53 @@ def add_data_node(result, s, d_count, e_count, current_p, script_name, data_dir)
                         final_data.append(line[1:])
 
             df = pandas.DataFrame(final_data)
+
             # df initialization failed, reset it to None so that a string is printed instead of an empty df
             if df.empty:
                 df = None
+    return df
+
+def add_data_node(result, d_count, current_data_node):
+    """  called by add_data """
+
+    # add data node
+    dkey_string = "d" + str(d_count)
+    d_count+=1
+    result["entity"][dkey_string] = current_data_node
+
+    return dkey_string, d_count
+
+def add_data_edge(e_count, current_p, current_data_node, result, dkey_string):
+    """  called by add_data """
+
+    # make edge
+    current_edge_node = {}
+    current_edge_node['prov:activity'] = current_p
+    current_edge_node['prov:entity'] = dkey_string
+
+    # add edge
+    e_string = "e" + str(e_count)
+    e_count+=1
+    result['wasGeneratedBy'][e_string] = current_edge_node
+
+    return e_count, dkey_string
+
+def add_data(result, s, d_count, e_count, current_p, script_name, data_dir, to_csv = False):
+    """ makes intermediate data node if process had return value
+    if dataframe, make a snapshot csv
+    else, make a normal data node as a string """
+
+    # make data node
+    current_data_node = {}
+    current_data_node['rdt:name'] = "data"
+    current_data_node['rdt:scope'] = "R_GlobalEnv"
+    keys = ["rdt:fromEnv", "rdt:timestamp", "rdt:location"]
+    values = ["FALSE", "", ""]
+    for i in range (0, len(keys)):
+        current_data_node[keys[i]] = values[i]
+
+    # If possible, convert data to dataframe to save intermediate values and improve vis
+    df = get_data_frame(s)
 
     if isinstance(df, pandas.core.frame.DataFrame):
         current_data_node['rdt:type'] = "Snapshot"
@@ -470,19 +510,24 @@ def add_data_node(result, s, d_count, e_count, current_p, script_name, data_dir)
         if not os.path.exists(directory):
             os.makedirs(directory)
         path = directory + filename
-        #write to csv
+
+        # write to csv
         df.to_csv(path)
         current_data_node['rdt:value'] = "../data/intermediate_values_of_" + script + "_data/" + filename
+
+        if not to_csv: # add node and edge
+            dkey_string, d_count = add_data_node(result, d_count, current_data_node)
+            e_count, dkey_string = add_data_edge(e_count, current_p, current_data_node, result, dkey_string)
+        else: # if csv, only want to add node, not incoming edge
+            dkey_string, d_count = add_data_node(result, d_count, current_data_node)
+
+        return d_count, e_count, dkey_string
     else:
         # if the return value is None, return same d_count and e_count
         return d_count, e_count, None
 
-    d_count, e_count, dkey_string = add_data_edge(d_count, e_count, current_p, current_data_node, result)
-
-    return d_count, e_count, dkey_string
-
 def get_arguments_from_sql(input_db_file, return_value, run_num, activation_id_to_p_string, lowest_process_num):
-    """ queries sql database to find functions dependent on intermediate return value
+    """ queries sql db to find process nodes dependent on intermediate return values
     returns the process_string of these processes """
 
     target_processes = []
@@ -495,7 +540,7 @@ def get_arguments_from_sql(input_db_file, return_value, run_num, activation_id_t
     # get all dependent processes and convert to p_string
     for p in all_dep_processes:
         process = p[2]
-        if process > lowest_process_num:
+        if process >= lowest_process_num:
             p_string = activation_id_to_p_string[process]
             target_processes.append(p_string)
 
@@ -519,14 +564,6 @@ def int_data_to_process(dkey_string, process_string, e_count, result):
 def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir, script_line_dict):
     """ uses the information from the database
     to make a dictionary compatible with Prov-JSON format
-
-    1. Get Defaults and start node
-    2. Loop through script_steps
-        a. Make process nodes
-        b. Check and add file acccesses and edges
-        c. Check and add intermediate data values and edges
-        d. Make informs edges
-    3. Make finish node and final informs edge
     """
 
     # if first script in list, set up the default formats
@@ -553,7 +590,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
     for i in range (1, len(script_steps)):
         s = script_steps[i]
 
-        # get the line of the script
+        # get the line of the script to use as the process node label
         try:
             current_line = script_line_dict[s[4]]
         except:
@@ -574,21 +611,20 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
             prev_p = "p" + str(p_count-1)
 
         # if current step is a function, add start node
-        # store the function_activation_id in stack to be able to make Finish node
+        # store the function_activation_id in stack to make Finish node later
         if s[2] in func_ends:
             current_p, p_count = add_start_node(result, s, p_count)
             process_stack.append(func_ends[s[2]])
             function_stack.append(func_ends[s[2]])
 
         # if current_step is the start of a loop, add start node
-        # store the last line in loop in stack to be able to make Finish node
+        # store the last line in loop in stack to make Finish node later
         elif s[4] in loop_dict.keys():
             current_p, p_count = add_start_node(result, s, p_count, current_line.strip())
             process_stack.append(loop_dict[s[4]])
             loop_name_stack.append(current_line.strip())
             loop_stack.append(loop_dict[s[4]])
 
-        # if no special cases, add normal process node
         else:
 
             # try:
@@ -600,23 +636,34 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
 
             # if current_line != next_line:
 
+            # add normal process node
             p_count, current_p = add_process(result, s[2], p_count, s, script_name, current_line)
 
+            # special case checks
             if "pandas.read_csv" in current_line:
                 # if reading csv, ensure that input file is detected, even w/o "with open as f" syntax
                 check_input_files_and_add(input_db_file, run_num, p_count, files)
+
+            if "to_csv" in current_line:
+                d_count, e_count, dkey_string, int_value = check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_count, p_count, result, s, prev_p, script_name, data_dir, int_values)
+                # if return value and dkey_string exists, add info to data structures
+                if dkey_string != None:
+                    int_values.append(int_value)
+                    lowest_process_num.append(s[1])
+                    int_dkey_strings.append(dkey_string)
 
         # dict for use in get_arguments_from_sql
         activation_id_to_p_string[s[1]] = current_p
 
         # if current_line != next_line:
+
         # if process node reads or writes to file, add file nodes and edges
         if s[1] in files.keys():
             d_count, e_count = add_file(result, files, d_count, e_count, current_p, s, outfiles, script_steps[0], activation_id_to_p_string, data_dict)
 
         # if process node has return statement, make intermediate data node and edges
         if s[3] != "None":
-            d_count, e_count, dkey_string = add_data_node(result, s, d_count, e_count, current_p, script_name, data_dir)
+            d_count, e_count, dkey_string = add_data(result, s, d_count, e_count, current_p, script_name, data_dir)
 
             # if return value and dkey_string exists, add info to data structures
             if dkey_string != None:
@@ -774,6 +821,7 @@ def main():
         # single script results -->python prov dir with name script.json
         if len(trial_num_list)==1:
             get_prov(input_db_file, script_path, trial_num_list)
+            print("Wrote prov for " + script_name + " to " + script_path)
 
         # workflow results -->results dir with name script1.json
         else:
@@ -783,6 +831,8 @@ def main():
             last_script_name = temp[1]
             output_json_file = "/Users/jen/Desktop/newNow/results/workflow_" + script_name+ "_to_" + last_script_name +".json"
             link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_name)
+
+            print("Wrote prov to " + script_path)
 
 if __name__ == "__main__":
     main()
