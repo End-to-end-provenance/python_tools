@@ -180,7 +180,10 @@ def check_input_files_and_add(input_db_file, run_num, p_count, files, s):
     c.execute('SELECT trial_id, value, function_activation_id, name from object_value where trial_id = ? and function_activation_id = ? and name = ?', (run_num, s[1], "filepath_or_buffer"))
     temp = c.fetchone()
 
-    filename = temp[1].strip("'")
+    try:
+        filename = temp[1].strip("'")
+    except:
+        return
 
     try: #find existing file from that line
         # TO DO
@@ -233,24 +236,24 @@ def add_file_node(script, current_link_dict, d_count, result, data_dict):
     for i in range (0, len(keys)):
         current_file_node[keys[i]] = values[i]
 
-    split_path_file = current_link_dict['name'].split("/")
-    temp = current_link_dict['name'].strip('.')
-    # for consistency, stip all leading .
+    split_file_path = current_link_dict['name'].strip('.')
+    split = split_file_path.split("/")[1:]
 
-    # then, add 2 ..
-    # set value/relative path according to file's parent directory
-    try:
-        if split_path_file[1] == "results":
-            current_file_node['rdt:value'] = ".." + temp
-        elif split_path_file[1] == "data":
-            current_file_node['rdt:value'] = ".." +temp
-        else:
-            # if not in data or results, put entire path
-            current_file_node['rdt:value']= current_link_dict['name']
+    # if relative path provided
+    if split[0] == "results" or split[0] == "data":
+        temp = "/".join(split)
 
-    # avoid errors if the file name is not a full path and put entire path
-    except:
-        current_file_node['rdt:value']= current_link_dict['name']
+    # if full path provided
+    else:
+        if "data" in split:
+            start = split.index("data")
+            temp = "/".join(split[start:])
+        elif "results" in split:
+            start = split.index("results")
+            temp = "/".join(split[start:])
+
+    # set value/relative path according to file's parent directory.
+    current_file_node['rdt:value'] = "../" + temp
 
     # add file node
     dkey_string = "d" + str(d_count)
@@ -587,15 +590,19 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
     process_stack.append(script_steps[0][4])
     function_stack.append(script_steps[0][4])
 
+    prev_process_label = ""
+    current_line = script_line_dict[script_steps[1][4]]
+
     # iterate through each line in the script
     for i in range (1, len(script_steps)):
         s = script_steps[i]
 
-        # get the line of the script to use as the process node label
+        # get the next line of the script to check for repeated process labels
         try:
-            current_line = script_line_dict[s[4]]
+            next_s = script_steps[i+1]
+            next_process_label = script_line_dict[next_s[4]]
         except:
-            current_line = " "
+            next_process_label = ""
 
         # if loop has ended on current step, add finish node
         if len(loop_stack)>0 and s[4] >= loop_stack[-1]:
@@ -628,53 +635,45 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
 
         else:
 
-            # try:
-            #     next_s = script_steps[i+1]
-            #     # get the next line of the script
-            #     next_line = script_line_dict[next_s[4]]
-            # except:
-            #     next_line = "None"
+            if current_line != prev_process_label:
+                p_count, current_p = add_process(result, s[2], p_count, s, script_name, current_line)
 
-            # if current_line != next_line:
+                # special case checks
+                if "pandas.read_csv" in current_line:
+                    # if reading csv, ensure that input file is detected, even w/o "with open as f" syntax
+                    check_input_files_and_add(input_db_file, run_num, p_count, files, s)
 
-            # add normal process node
-            p_count, current_p = add_process(result, s[2], p_count, s, script_name, current_line)
-
-            # special case checks
-            if "pandas.read_csv" in current_line:
-                # if reading csv, ensure that input file is detected, even w/o "with open as f" syntax
-                check_input_files_and_add(input_db_file, run_num, p_count, files, s)
-
-            if "to_csv" in current_line:
-                d_count, e_count, dkey_string, int_value = check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_count, p_count, result, s, prev_p, script_name, data_dir, int_values)
-                # if return value and dkey_string exists, add info to data structures
-                if dkey_string != None:
-                    int_values.append(int_value)
-                    lowest_process_num.append(s[1])
-                    int_dkey_strings.append(dkey_string)
+                if "to_csv" in current_line:
+                    d_count, e_count, dkey_string, int_value = check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_count, p_count, result, s, prev_p, script_name, data_dir, int_values)
+                    # if return value and dkey_string exists, add info to data structures
+                    if dkey_string != None:
+                        int_values.append(int_value)
+                        lowest_process_num.append(s[1])
+                        int_dkey_strings.append(dkey_string)
 
         # dict for use in get_arguments_from_sql
         activation_id_to_p_string[s[1]] = current_p
-
-        # if current_line != next_line:
 
         # if process node reads or writes to file, add file nodes and edges
         if s[1] in files.keys():
             d_count, e_count = add_file(result, files, d_count, e_count, current_p, s, outfiles, script_steps[0], activation_id_to_p_string, data_dict)
 
-        # if process node has return statement, make intermediate data node and edges
-        if s[3] != "None":
-            d_count, e_count, dkey_string = add_data(result, s, d_count, e_count, current_p, script_name, data_dir)
+        # if process is not redundant
+        if current_line != next_process_label:
+            # if process node has return statement, make intermediate data node and edges
+            if s[3] != "None":
+                d_count, e_count, dkey_string = add_data(result, s, d_count, e_count, current_p, script_name, data_dir)
 
-            # if return value and dkey_string exists, add info to data structures
-            if dkey_string != None:
-                int_values.append(s[3])
-                lowest_process_num.append(s[1])
-                int_dkey_strings.append(dkey_string)
+                # if return value and dkey_string exists, add info to data structures
+                if dkey_string != None:
+                    int_values.append(s[3])
+                    lowest_process_num.append(s[1])
+                    int_dkey_strings.append(dkey_string)
 
-        # add_informs_edge between all process nodes
-        e_count = add_informs_edge(result, prev_p, current_p, e_count)
-        prev_p = "p" + str(p_count-1)
+        if current_line != prev_process_label:
+            # add_informs_edge between all process nodes
+            e_count = add_informs_edge(result, prev_p, current_p, e_count)
+            prev_p = "p" + str(p_count-1)
 
         # if function, NOT LOOP, has ended on current step, add finish node
         if s[4] == function_stack[-1]:
@@ -689,6 +688,9 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
             # add informs edge between last process node in loop and the finish node of the loop
             e_count = add_informs_edge(result, prev_p, current_p, e_count)
             prev_p = "p" + str(p_count-1)
+
+        prev_process_label = current_line
+        current_line = next_process_label
 
     # after all steps in script done
     # add finish nodes (both loops and functions)
@@ -822,7 +824,7 @@ def main():
         # single script results -->python prov dir with name script.json
         if len(trial_num_list)==1:
             get_prov(input_db_file, script_path, trial_num_list)
-            print("Wrote prov for " + script_name + " to " + script_path)
+            print("Wrote script prov for " + script_name + " to " + script_path)
 
         # workflow results -->results dir with name script1.json
         else:
@@ -833,7 +835,7 @@ def main():
             output_json_file = "/Users/jen/Desktop/newNow/results/workflow_" + script_name+ "_to_" + last_script_name +".json"
             link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_name)
 
-            print("Wrote prov to " + script_path)
+            print("Wrote workflow prov to " + script_path)
 
 if __name__ == "__main__":
     main()
