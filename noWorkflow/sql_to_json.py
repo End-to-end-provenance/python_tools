@@ -55,12 +55,31 @@ def get_info_from_sql(input_db_file, run_num):
 
     return script_steps, files, func_ends, end_funcs
 
-def get_script_line_dict(script_name):
+def get_script_file(input_db_file, trial_num):
+    """ query the db for the code hash for scripts in workflows """
+
+    db = sqlite3.connect(input_db_file, uri=True)
+    c = db.cursor()
+
+    # process nodes
+    c.execute('SELECT id, code_hash from trial where id = ?', (trial_num,))
+    code_hash = c.fetchone()[1]
+
+    dir_code = code_hash[0:2]
+    file_name = code_hash[2:]
+
+    db_dir = "/".join(input_db_file.split("/")[0:-1])
+    path_to_file = os.path.join(db_dir, "content", dir_code, file_name)
+
+    return path_to_file
+
+def get_script_line_dict(path_to_file):
     """ keys = line_number, values = line
     used for labelling the process nodes """
+
     script_line_dict = {}
 
-    with open(script_name) as f:
+    with open(path_to_file) as f:
         for i, line in enumerate(f):
             script_line_dict[i+1]=line.strip()
 
@@ -761,8 +780,9 @@ def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_
     # for each trial, query and add to the result
     for trial_num in trial_num_list:
         script_steps, files, func_ends, end_funcs = get_info_from_sql(input_db_file, trial_num)
-        loop_dict = get_loop_locations(script_name)
-        script_line_dict = get_script_line_dict(script_name)
+        path_to_file = get_script_file(input_db_file, trial_num)
+        script_line_dict = get_script_line_dict(path_to_file)
+        loop_dict = get_loop_locations(path_to_file)
         result, p_count, d_count, e_count, outfiles, finish_node = make_dict(script_steps, files, input_db_file, trial_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir, script_line_dict)
 
     # Write to file
