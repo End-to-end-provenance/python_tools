@@ -204,13 +204,9 @@ def check_input_files_and_add(input_db_file, run_num, p_count, files, s):
     except:
         return
 
-    try: #find existing file from that line
-        # TO DO
-        files[p_count-2]['name']
-        # p_count-2 since incremented twice
-    except: # make new entry
-        temp_dict = {'hash': None, 'name': filename, 'mode': 'r'}
-        files[temp[2]]= temp_dict
+    # make new entry
+    temp_dict = {'hash': None, 'name': filename, 'mode': 'r'}
+    files[temp[2]]= temp_dict
 
 def check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_count, p_count, result, s, prev_p, script_name, data_dir, int_values):
     """ if to_csv does not have incoming data node bc of lacking recent assignment
@@ -243,7 +239,7 @@ def check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_co
         print("except")
         return d_count, e_count, None, None
 
-def add_file_node(script, current_link_dict, d_count, result, data_dict):
+def add_file_node(script, current_link_dict, d_count, result, data_dict, activation_id_to_p_string, s, h, path_array, first_step, outfiles):
     """ adds a file node, called by add_file """
 
     #make file node
@@ -282,6 +278,19 @@ def add_file_node(script, current_link_dict, d_count, result, data_dict):
     # add to dict of edges to make connections b/w graphs
     data_dict[script] = dkey_string
 
+    if "w" in current_link_dict['mode']:
+    # if file created, add to outfiles dict for linking graphs
+        inner_dict = {'data_node_num': dkey_string, 'hash_out': h}
+        inner_dict['source']= activation_id_to_p_string[int(s[1])]
+
+        if first_step[2] in outfiles.keys():
+            temp = outfiles[first_step[2]]
+            temp[script] = inner_dict
+            outfiles[first_step[2]] = temp
+        else:
+            middle_dict = {script : inner_dict}
+            outfiles[first_step[2]] = middle_dict
+
     return d_count, dkey_string
 
 def add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles):
@@ -297,14 +306,10 @@ def add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, ac
     e_count+=1
 
     # choose the correct category based on mode: r --> used, w --> wasGeneratedBy
-    if current_link_dict['mode'] == "r":
+    if "r" in current_link_dict['mode']:
         result['used'][e_string] = current_edge_node
     else:
         result['wasGeneratedBy'][e_string] = current_edge_node
-        # if file created, add to outfiles dict for linking graphs
-        inner_dict = {'data_node_num': dkey_string, 'source': activation_id_to_p_string[s[1]], 'hash_out': h}
-        outer_dict = {path_array[-1] : inner_dict}
-        outfiles[first_step[2]] = outer_dict
 
     return e_count
 
@@ -322,25 +327,21 @@ def add_file(result, files, d_count, e_count, current_p, s, outfiles, first_step
     file_entry = files[s[1]]
     h = file_entry['hash']
 
-    if len(outfiles.keys()) !=0:
-    # if not first script, check to see if the file already has a node using name and hash
-        for script in outfiles.keys():
-                for outfile in outfiles[script]:
-                    # if already seen
-                    if outfile == path_array[-1] and outfiles[script][outfile]['hash_out']==h:
-                        # do not add new node, but return d_key_string
-                        dkey_string = data_dict[path_array[-1]]
+    for script in outfiles.keys():
+        for outfile in outfiles[script]:
+            # if already seen
+            if outfile == path_array[-1]:
+                if outfiles[script][outfile]['hash_out']==None or h==None or outfiles[script][outfile]['hash_out']==h:
+                    # do not add new node, but return d_key_string
+                    dkey_string = data_dict[path_array[-1]]
+                # else: no match, add new node.
 
-        if dkey_string == -1: # if not seen yet, add node
-            d_count, dkey_string = add_file_node(path_array[-1], current_link_dict, d_count, result, data_dict)
+    if dkey_string == -1: # if not seen yet, add node
+        d_count, dkey_string = add_file_node(path_array[-1], current_link_dict, d_count, result, data_dict, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
+        # the addition is overwriting instead of adding to the dict
 
-        # no matter if new or seen, add new dependent edge
-        e_count = add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
-
-    # if first script, add file nodes w/o checking existence
-    else:
-        d_count, dkey_string = add_file_node(path_array[-1], current_link_dict, d_count, result, data_dict)
-        e_count = add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
+    # no matter if new or seen, add new dependent edge
+    e_count = add_file_edge(current_p, dkey_string, e_count, current_link_dict, result, activation_id_to_p_string, s, h, path_array, first_step, outfiles)
 
     return d_count, e_count
 
@@ -653,12 +654,11 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
             loop_stack.append(loop_dict[s[4]])
 
         else:
-
             if current_line != prev_process_label:
                 p_count, current_p = add_process(result, s[2], p_count, s, script_name, current_line)
 
                 # special case checks
-                if "pandas.read_csv" in current_line:
+                if "pandas.read_csv" in current_line and "with open" not in prev_process_label:
                     # if reading csv, ensure that input file is detected, even w/o "with open as f" syntax
                     check_input_files_and_add(input_db_file, run_num, p_count, files, s)
 
@@ -855,7 +855,7 @@ def main():
             output_json_file = "/Users/jen/Desktop/newNow/results/workflow_" + script_name+ "_to_" + last_script_name +".json"
             link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_name)
 
-            print("Wrote workflow prov to " + script_path)
+            print("Wrote workflow prov to " + output_json_file)
 
 if __name__ == "__main__":
     main()
