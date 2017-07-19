@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 from io import StringIO
+import hashlib
+BUF_SIZE = 65536
 
 def get_info_from_sql(input_db_file, run_num):
     """ queries noWorkflow sql database """
@@ -208,8 +210,18 @@ def check_input_files_and_add(input_db_file, run_num, files, function_activation
     except:
         return
 
-    # make new entry
-    temp_dict = {'hash': None, 'name': filename, 'mode': 'r'}
+    #generate a sha1 hash
+    sha1 = hashlib.sha1()
+    with open(filename, 'rb') as f:
+        while True:
+            data = f.read(BUF_SIZE)
+            if not data:
+                break
+            sha1.update(data)
+    h = format(sha1.hexdigest())
+
+    # make new entry with this hash
+    temp_dict = {'hash': h, 'name': filename, 'mode': 'r'}
     files[temp[2]]= temp_dict
 
 def check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_count, result, function_activation_id, prev_p, script_name, data_dir, int_values):
@@ -354,25 +366,52 @@ def get_data_frame(s):
     if s[3]!=None:
 
         y = s[3].split("\n")
+        first_line = y[0].strip()
         last_line = y[-1].strip()
 
         if "Name" in last_line:
-
+            # get col names from last line
             temp = s[3].split("Name")[0]
             df_as_string = StringIO(temp)
             col = last_line.split()[1].strip(",")
             df = pandas.read_csv(df_as_string, delim_whitespace = True, index_col = 0, names = [col])
 
-        else:
+        elif "\\" in first_line:
+
+            # TO DO
 
             df_as_string = StringIO(s[3])
             df = pandas.read_csv(df_as_string, delim_whitespace = True, index_col = 0)
 
+        elif "Unnamed" in first_line:
+            # get col names from first line
+            # remove extra unnamed col with unnecessary index numbering
+
+            for i in range (1, len(y)):
+                y[i]=y[i][1:]
+            y = "\n".join(y[1:])
+            col = first_line.split()[2:]
+            df_as_string = StringIO(y)
+            df = pandas.read_csv(df_as_string, delim_whitespace = True, names = col, index_col = 0)
+
+        else:
+
+            # usual case
+            df_as_string = StringIO(s[3])
+            df = pandas.read_csv(df_as_string, index_col = 0)
+
+            # if all data goes into 1 list or the other
+            if len(df.columns) >0 or len(df.index)>0:
+                # get the col names from the first line
+                col = y[0].split()
+                y = "\n".join(y[1:])
+                df_as_string = StringIO(y)
+                df = pandas.read_csv(df_as_string, delim_whitespace = True, names = col)
+
         # if some sort of object, module, single integer, or non-df
         if df.empty:
-            df = None
-            # TO DO: how to return a single data node as a str/window
-            
+            return s[3]
+
     return df
 
 def add_data_node(result, d_count, current_data_node):
@@ -438,6 +477,15 @@ def add_data(result, s, d_count, e_count, current_p, script_name, data_dir, to_c
             dkey_string, d_count = add_data_node(result, d_count, current_data_node)
 
         return d_count, e_count, dkey_string
+
+    elif isinstance(df, str):
+        # if the return value is a non df, like a string, single integer, or module
+        current_data_node['rdt:type'] = "Data"
+        current_data_node['rdt:value'] = s[3].strip("'").strip()
+        dkey_string, d_count = add_data_node(result, d_count, current_data_node)
+        e_count, dkey_string = add_data_edge(e_count, current_p, current_data_node, result, dkey_string)
+        return d_count, e_count, dkey_string
+
     else:
         # if the return value is None, return same d_count and e_count
         return d_count, e_count, None
@@ -636,11 +684,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
         for process in target_processes:
             e_count = int_data_to_process(int_dkey_strings[i], process, e_count, result)
 
-    #print(files)
-    # TO DO
-    # write all files to hash table
-
-    return result, p_count, d_count, e_count, outfiles, current_p
+    return result, p_count, d_count, e_count, outfiles, current_p, files
 
 def get_loop_locations(script_name):
     """ uses ast module to find the start and end lines of for and while loops
@@ -663,6 +707,41 @@ def write_json(dictionary, output_json_file):
     with open(output_json_file, 'w') as outfile:
         json.dump(dictionary, outfile, default=lambda temp: json.loads(temp.to_json()))
 
+def write_to_hashtable(files, outfiles, script_name):
+    """ writes to hashtable located in home/.ddg/hashtable.json """
+
+    # first, convert files
+    # from format function_activation_id-->entry
+    # to format filename -->rest of the info in entry
+    temp_files = {}
+    for f in files:
+        if files[f]['mode'] == "w":
+            temp_files[files[f]['name'].split("/")[-1]] = {'full_path': files[f]['name']}
+        # else if mode == r
+    print(temp_files.keys())
+
+    # first, deal with outfiles using outfiles
+    for script in outfiles.keys():
+        for output_key in outfiles[script]:
+            h = outfiles[script][output_key]["hash_out"]
+            d = outfiles[script][output_key]["data_node_num"].strip("d")
+
+            print(temp_files[output_key])
+            print(outfiles[script])
+
+            current_entry = {}
+            current_entry['ScriptPath'] = script_name
+            current_entry['FilePath'] = temp_files[output_key]['full_path']
+            current_entry['SHA1Hash'] = h
+            current_entry['ReadWrite'] = "write"
+            current_entry['NodeNumber'] = d
+            # DDG Path
+            # Node Path
+            # timestamp
+            # value
+            print(current_entry)
+    # then, deal with in files using the remaining entries in temp_files
+
 def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_name):
     """ input: db_file generated by noworkflow
     target path where the Prov-JSON file will be written
@@ -682,10 +761,14 @@ def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_
     # for each trial, query and add to the result
     for trial_num in trial_num_list:
         script_steps, files, func_ends, end_funcs = get_info_from_sql(input_db_file, trial_num)
-        path_to_file = get_script_file(input_db_file, trial_num)
+        path_to_file = get_script_file(input_db_file, trial_num) # location in content db
         script_line_dict = get_script_line_dict(path_to_file)
         loop_dict = get_loop_locations(path_to_file)
-        result, p_count, d_count, e_count, outfiles, finish_node = make_dict(script_steps, files, input_db_file, trial_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir, script_line_dict)
+        result, p_count, d_count, e_count, outfiles, finish_node, files = make_dict(script_steps, files, input_db_file, trial_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir, script_line_dict)
+
+        # TO DO
+
+        write_to_hashtable(files, outfiles, script_name)
 
     # Write to file
     write_json(result, output_json_file)
