@@ -3,6 +3,7 @@ import json
 import ast
 import pandas
 import os
+from os.path import expanduser
 import subprocess
 import sys
 from io import StringIO
@@ -622,6 +623,9 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
             # if process node reads or writes to file, add file nodes and edges
             if s[1] in files.keys():
                 d_count, e_count = add_file(result, files, d_count, e_count, current_p, s, outfiles, script_steps[0], activation_id_to_p_string, data_dict)
+                if files[s[1]]['mode']=="r":
+                    # if a read file, add another entry to the files dict for writing to hashtable
+                    files[s[1]]['nodenum']=d_count-1
 
             # if process is not redundant
             if current_line != next_process_label:
@@ -707,40 +711,84 @@ def write_json(dictionary, output_json_file):
     with open(output_json_file, 'w') as outfile:
         json.dump(dictionary, outfile, default=lambda temp: json.loads(temp.to_json()))
 
-def write_to_hashtable(files, outfiles, script_name):
-    """ writes to hashtable located in home/.ddg/hashtable.json """
+def add_default_hash_node(current_entry, isRead, script_name, ddg_path, end_of_file_path, new_entries):
+    """ adds default values to the hash_node
+    adds hash_node to the new_entries"""
+
+    if isRead:
+        current_entry['ReadWrite'] = "read"
+    else:
+        current_entry['ReadWrite'] = "write"
+
+    current_entry['ScriptPath'] = script_name
+    current_entry['DDGPath'] = ddg_path
+
+    # # use overlap of paths to get the full, non relative file path
+    i=0
+    start_of_file_path = ""
+    while script_name[i] == ddg_path[i]:
+        start_of_file_path+=script_name[i]
+        i+=1
+    file_path = start_of_file_path + end_of_file_path
+    current_entry['FilePath'] = file_path
+
+    keys = ["NodePath", "Timestamp", "Value"]
+    for key in keys:
+        current_entry[key] = ""
+    new_entries.append(current_entry)
+
+def write_to_hashtable(files, outfiles, script_name, ddg_path):
+    """ records file IO using files and outfiles into hash_nodes
+    that are added to new_entries
+    which is written/added to home/.ddg/hashtable.json """
+
+    new_entries = []
 
     # first, convert files
     # from format function_activation_id-->entry
     # to format filename -->rest of the info in entry
-    temp_files = {}
+    temp_out_files = {}
     for f in files:
         if files[f]['mode'] == "w":
-            temp_files[files[f]['name'].split("/")[-1]] = {'full_path': files[f]['name']}
-        # else if mode == r
-    print(temp_files.keys())
+            temp_out_files[files[f]['name'].split("/")[-1]] = {'full_path': files[f]['name']}
+        elif files[f]['mode'] == "r":
+            # in files using files
+            current_entry = {}
+            current_entry['SHA1Hash'] = files[f]["hash"]
+            current_entry['NodeNumber'] = str(files[f]["nodenum"])
+            add_default_hash_node(current_entry, True, script_name, ddg_path, files[f]['name'].strip("../"), new_entries)
 
-    # first, deal with outfiles using outfiles
+    # outfiles using outfiles and temp_out_files
     for script in outfiles.keys():
         for output_key in outfiles[script]:
-            h = outfiles[script][output_key]["hash_out"]
-            d = outfiles[script][output_key]["data_node_num"].strip("d")
-
-            print(temp_files[output_key])
-            print(outfiles[script])
-
+            # use outfiles and temp_out_files to set entries to dictionary
             current_entry = {}
-            current_entry['ScriptPath'] = script_name
-            current_entry['FilePath'] = temp_files[output_key]['full_path']
-            current_entry['SHA1Hash'] = h
-            current_entry['ReadWrite'] = "write"
-            current_entry['NodeNumber'] = d
-            # DDG Path
-            # Node Path
-            # timestamp
-            # value
-            print(current_entry)
-    # then, deal with in files using the remaining entries in temp_files
+            current_entry['SHA1Hash'] = outfiles[script][output_key]["hash_out"]
+            current_entry['NodeNumber'] = outfiles[script][output_key]["data_node_num"].strip("d")
+            add_default_hash_node(current_entry, False, script_name, ddg_path, temp_out_files[output_key]['full_path'].strip("../"), new_entries)
+
+    # write new_entries to the home dir
+    # temp_file_path = "/Users/jen/Desktop/temp.json"
+    home = expanduser("~")
+    hashtable_path = os.path.join(home, ".ddg", "hashtable.json")
+
+    if not os.path.isfile(hashtable_path):
+        with open(hashtable_path, 'w') as f:
+            json.dump(new_entries, f)
+    else:
+        with open(hashtable_path, 'r') as f:
+            try:
+                existing_entries = json.load(f)
+            except: # if the file is empty at first, need to initialize existing_entries
+                existing_entries = []
+
+            for entry in new_entries:
+                if entry not in existing_entries:
+                    # if entry does not already exist
+                    existing_entries.append(entry)
+
+        with open(hashtable_path, 'w') as f:
+            json.dump(existing_entries, f)
 
 def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_name):
     """ input: db_file generated by noworkflow
@@ -758,6 +806,8 @@ def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_
     result, outfiles, data_dict = {}, {}, {}
     finish_node = None
 
+    ddg_path = "/".join(output_json_file.split("/")[:-1])
+
     # for each trial, query and add to the result
     for trial_num in trial_num_list:
         script_steps, files, func_ends, end_funcs = get_info_from_sql(input_db_file, trial_num)
@@ -767,8 +817,7 @@ def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_
         result, p_count, d_count, e_count, outfiles, finish_node, files = make_dict(script_steps, files, input_db_file, trial_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir, script_line_dict)
 
         # TO DO
-
-        write_to_hashtable(files, outfiles, script_name)
+        write_to_hashtable(files, outfiles, script_name, ddg_path)
 
     # Write to file
     write_json(result, output_json_file)
