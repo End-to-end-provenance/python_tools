@@ -9,6 +9,8 @@ import sys
 from io import StringIO
 import hashlib
 BUF_SIZE = 65536
+from datetime import datetime
+from time import localtime
 
 def get_info_from_sql(input_db_file, run_num):
     """ queries noWorkflow sql database """
@@ -249,44 +251,52 @@ def check_input_intermediate_value_and_add(input_db_file, run_num, d_count, e_co
     except:
         return d_count, e_count, None, None
 
+def now():
+    """ gets the current time for file and data node timestamps """
+    lt = localtime()
+    result = datetime.now().strftime('%Y-%m-%d' + "T" + "%H.%M.%S%z" + lt.tm_zone)
+    return result
+
 def add_file_node(filename, current_link_dict, d_count, result, data_dict, activation_id_to_p_string, function_activation_id, h, first_step, outfiles, data_dir):
     """ adds a file node, called by add_file """
 
     #make file node
     current_file_node = {}
-    current_file_node['rdt:name'] = filename
-    current_file_node['rdt:type'] = "File"
-    keys = ['rdt:scope', "rdt:fromEnv", "rdt:timestamp", "rdt:location"]
-    values = ["undefined", "FALSE", "", ""]
+    current_file_node["rdt:timestamp"] = now()
+    keys = ['rdt:scope', "rdt:fromEnv", "rdt:name", "rdt:type", "rdt:SHA1hash", "rdt:valType"]
+    temp = {"container": "vector", "dimension": [1], "type": ["character"]}
+    values = ["undefined", "FALSE", filename, "File", h, temp]
     for i in range (0, len(keys)):
         current_file_node[keys[i]] = values[i]
 
-    split_file_path = current_link_dict['name'].strip('.')
-    split = split_file_path.split("/")[1:]
+    # get the full path by combining the 2 shorter paths and removing overlaps
+    end_split = current_link_dict['name'].split("/")
 
-    if len(split)>0:
-        # if relative path provided
-        if split[0] == "results" or split[0] == "data":
-            temp = "/".join(split)
-        # if full path provided
-        else:
-            if "data" in split:
-                start = split.index("data")
-                temp = "/".join(split[start:])
-            elif "results" in split:
-                start = split.index("results")
-                temp = "/".join(split[start:])
+    if "data" in end_split:
+        start_split = data_dir.split("/")
+    elif "results" in end_split:
+        start_split = os.getcwd().split("/")[:-1]
 
-        # set value/relative path according to file's parent directory.
-        current_file_node['rdt:value'] = "../" + temp
-    else:
-        # if only file name, no path provided
-        # reading/writing files to same scripts dir
-        full_path  = os.path.join(os.getcwd(), split_file_path)
-        i = 0
-        while full_path[i]==data_dir[i]:
-            i+=1
-        current_file_node['rdt:value'] = "../" + full_path[i:]
+    total_overlap = start_split + end_split
+
+    for elt in total_overlap:
+        if elt =="" or elt == "..":
+            total_overlap.remove(elt)
+
+    # remove overlaps and keep ordering
+    seen = {}
+    path = "/" + "/".join([seen.setdefault(x, x) for x in total_overlap if x not in seen])
+
+    current_file_node["rdt:location"] = path
+
+    # get value from the overlap with scripts dir
+    i = 0
+    value = ""
+    while path[i] == os.getcwd()[i]:
+        value+=path[i]
+        i+=1
+
+    current_file_node["rdt:value"] = "../" + path[i:]
 
     # add file node
     dkey_string = "d" + str(d_count)
@@ -451,10 +461,8 @@ def add_data(result, s, d_count, e_count, current_p, script_name, data_dir, to_c
 
     # make data node
     current_data_node = {}
-    current_data_node['rdt:name'] = "data"
-    current_data_node['rdt:scope'] = "R_GlobalEnv"
-    keys = ["rdt:fromEnv", "rdt:timestamp", "rdt:location"]
-    values = ["FALSE", "", ""]
+    keys = ["rdt:fromEnv", "rdt:timestamp", "rdt:location", "rdt:name", "rdt:scope", "rdt:SHA1hash"]
+    values = ["FALSE", now(), "", "data", "R_GlobalEnv", ""]
     for i in range (0, len(keys)):
         current_data_node[keys[i]] = values[i]
 
@@ -462,6 +470,20 @@ def add_data(result, s, d_count, e_count, current_p, script_name, data_dir, to_c
     df = get_data_frame(s)
 
     if isinstance(df, pandas.core.frame.DataFrame):
+
+        temp = {"container": "data_frame"}
+        temp['dimension'] = list(df.shape)
+        types = df.dtypes
+        final_types = []
+        for t in types:
+            if "int" or "float" in str(t):
+                final_types.append("numeric")
+            else:
+                final_types.append("character")
+
+        temp['type'] = final_types
+        current_data_node['rdt:valType'] = temp
+
         current_data_node['rdt:type'] = "Snapshot"
         # make dir if it doesn't exist
         filename = "line" + str(s[4]) + "data.csv"
@@ -485,8 +507,10 @@ def add_data(result, s, d_count, e_count, current_p, script_name, data_dir, to_c
 
     elif isinstance(df, str):
         # if the return value is a non df, like a string, single integer, or module
+
         current_data_node['rdt:type'] = "Data"
         current_data_node['rdt:value'] = s[3].strip("'").strip()
+        current_data_node['rdt:valType'] = {"container": "vector", "dimension": [1], "type":['character'] }
         dkey_string, d_count = add_data_node(result, d_count, current_data_node)
         e_count, dkey_string = add_data_edge(e_count, current_p, current_data_node, result, dkey_string)
         return d_count, e_count, dkey_string
@@ -537,11 +561,11 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
     to make a dictionary compatible with Prov-JSON format
     """
 
-    # if first script in list, set up the default formats
+    # if first script in workflow, set up the default formats
     if len(result.keys()) == 0:
         result = get_defaults(script_name)
 
-    # if not first script, add informs edge between
+    # if not first script in workflow, add informs edge b/w
     # the Finish of the previous script and the Start of the current script
     if finish_node!= None:
         current_p = "p" + str(p_count)
@@ -572,6 +596,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
             next_process_label = ""
 
         if "print" not in current_line:
+            # skip print() lines to condense DDG
 
             # if loop has ended on current step, add finish node
             if len(loop_stack)>0 and s[4] >= loop_stack[-1]:
@@ -628,10 +653,10 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
             if s[1] in files.keys():
                 d_count, e_count = add_file(result, files, d_count, e_count, current_p, s, outfiles, script_steps[0], activation_id_to_p_string, data_dict, data_dir)
                 if files[s[1]]['mode']=="r":
-                    # if a read file, add another entry to the files dict for writing to hashtable
+                    # if a read file, add another entry to files to facilitate writing to hashtable
                     files[s[1]]['nodenum']=d_count-1
 
-            # if process is not redundant
+            # if process is not redundantly labelled
             if current_line != next_process_label:
                 # if process node has return statement, make intermediate data node and edges
                 if s[3] != "None":
@@ -643,6 +668,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
                         lowest_process_num.append(s[1])
                         int_dkey_strings.append(dkey_string)
 
+            # TO DO: need this?
             if current_line != prev_process_label:
                 # add_informs_edge between all process nodes
                 e_count = add_informs_edge(result, prev_p, current_p, e_count)
@@ -692,6 +718,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
         for process in target_processes:
             e_count = int_data_to_process(int_dkey_strings[i], process, e_count, result)
 
+    # return current values for next script in workflow
     return result, p_count, d_count, e_count, outfiles, current_p, files
 
 def get_loop_locations(script_name):
@@ -733,22 +760,33 @@ def add_default_hash_node(current_entry, isRead, script_name, ddg_path, end_of_f
     while script_name[i] == ddg_path[i]:
         start_of_file_path+=script_name[i]
         i+=1
-    file_path = start_of_file_path + end_of_file_path
-    current_entry['FilePath'] = file_path
 
-    keys = ["NodePath", "Timestamp", "Value"]
+    total_overlap = start_of_file_path.split("/") + end_of_file_path.split("/")
+
+    for elt in total_overlap:
+        if elt =="" or elt == "..":
+            total_overlap.remove(elt)
+
+    # remove overlaps and keep ordering
+    seen = {}
+    file_path = "/" + "/".join([seen.setdefault(x, x) for x in total_overlap if x not in seen])
+
+    current_entry['FilePath'] = file_path
+    current_entry['Timestamp'] = now()
+
+    keys = ["NodePath", "Value"]
     for key in keys:
         current_entry[key] = ""
     new_entries.append(current_entry)
 
 def write_to_hashtable(files, outfiles, script_name, ddg_path):
     """ records file IO using files and outfiles into hash_nodes
-    that are added to new_entries
-    which is written/added to home/.ddg/hashtable.json """
+    which is written/added to ~/.ddg/hashtable.json
+    which can be opened in DDGExplorer 2.8.7 Display File Workflow """
 
     new_entries = []
 
-    # first, convert files
+    # convert outfiles in files
     # from format function_activation_id-->entry
     # to format filename -->rest of the info in entry
     temp_out_files = {}
@@ -756,34 +794,33 @@ def write_to_hashtable(files, outfiles, script_name, ddg_path):
         if "w" in files[f]['mode']:
             temp_out_files[files[f]['name'].split("/")[-1]] = {'full_path': files[f]['name']}
         elif "r" in files[f]['mode']:
-            # in files using files
+            # add infiles directly
             current_entry = {}
             current_entry['SHA1Hash'] = files[f]["hash"]
             current_entry['NodeNumber'] = str(files[f]["nodenum"])
             add_default_hash_node(current_entry, True, script_name, ddg_path, files[f]['name'].strip("../"), new_entries)
 
-    # outfiles using outfiles and temp_out_files
+    # add outfiles using outfiles and temp_out_files
     for script in outfiles.keys():
         for output_key in outfiles[script]:
-            # use outfiles and temp_out_files to set entries to dictionary
             current_entry = {}
             current_entry['SHA1Hash'] = outfiles[script][output_key]["hash_out"]
             current_entry['NodeNumber'] = outfiles[script][output_key]["data_node_num"].strip("d")
             add_default_hash_node(current_entry, False, script_name, ddg_path, temp_out_files[output_key]['full_path'].strip("../"), new_entries)
 
     # write new_entries to the home dir
-    # temp_file_path = "/Users/jen/Desktop/temp.json"
     home = expanduser("~")
     hashtable_path = os.path.join(home, ".ddg", "hashtable.json")
 
     if not os.path.isfile(hashtable_path):
+        # if file doesn't exist yet
         with open(hashtable_path, 'w') as f:
             json.dump(new_entries, f)
     else:
         with open(hashtable_path, 'r') as f:
             try:
                 existing_entries = json.load(f)
-            except: # if the file is empty at first, need to initialize existing_entries
+            except: # if file exists but is empty initialize
                 existing_entries = []
 
             # if the script is run again, remove old entries before adding new ones
@@ -797,8 +834,6 @@ def write_to_hashtable(files, outfiles, script_name, ddg_path):
         with open(hashtable_path, 'w') as f:
             json.dump(existing_entries, f)
 
-    return temp_out_files
-
 def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_name):
     """ input: db_file generated by noworkflow
     target path where the Prov-JSON file will be written
@@ -806,26 +841,30 @@ def link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_
     where trial numbers correspond to individual scripts stored in the noworkflow database
     If only 1 trial_num is provided, a single script is analyzed
 
-    output: prov-json file that can be opened in DDG Explorer
-
-    used by get_prov(script_path) """
+    output: prov-json file that can be opened in DDG Explorer """
 
     # initialize variables that will carry over from 1 script to the next
     p_count, d_count, e_count = 1, 1, 1
     result, outfiles, data_dict, global_files = {}, {}, {}, {}
     finish_node = None
 
-    # for each trial, query and add to the result
+    # for each trial, add to the result
     for trial_num in trial_num_list:
+        # query
         script_steps, files, func_ends, end_funcs = get_info_from_sql(input_db_file, trial_num)
-        path_to_file = get_script_file(input_db_file, trial_num) # location in content db
+        # get location in content db
+        path_to_file = get_script_file(input_db_file, trial_num)
+        # make script_line dict for labelling process nodes
         script_line_dict = get_script_line_dict(path_to_file)
+        # get loop locations for collapsible nodes
         loop_dict = get_loop_locations(path_to_file)
+        # update result
         result, p_count, d_count, e_count, outfiles, finish_node, files = make_dict(script_steps, files, input_db_file, trial_num, func_ends, end_funcs, p_count, d_count, e_count, outfiles, result, data_dict, finish_node, script_name, loop_dict, data_dir, script_line_dict)
 
     # Write to file
     write_json(result, output_json_file)
 
+    # return these values for use in writing to hashtable
     return files, outfiles, script_name
 
 def get_paths(script_path):
@@ -838,6 +877,7 @@ def get_paths(script_path):
     input script_path is __file__, where this is called from the script.py
 
     used by get_prov(script_path)"""
+
     scripts_dir = "/".join(script_path.split("/")[:-1])
     project_dir = "/".join(scripts_dir.split("/")[:-1])
     data_dir = os.path.join(project_dir, "data")
@@ -852,11 +892,6 @@ def get_paths(script_path):
     output_json_file = os.path.join(prov_dir, json_name)
 
     return output_json_file, data_dir
-
-def get_prov(input_db_file, script_path, trial_num_list):
-    output_json_file, data_dir = get_paths(script_path)
-    files, outfiles, script_name = link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_path)
-    return files, outfiles, script_name, output_json_file
 
 def main():
 
@@ -884,9 +919,11 @@ def main():
 
         # single script results -->python prov dir with name script.json
         if len(trial_num_list)==1:
-            files, outfiles, script_name, output_json_file = get_prov(input_db_file, script_path, trial_num_list)
+            output_json_file, data_dir = get_paths(script_path)
+            files, outfiles, script_name = link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_path)
+            # if a single script is run, add to hashtable
             write_to_hashtable(files, outfiles, script_name, output_json_file)
-            print("Wrote script prov for " + script_name + " to " + script_path)
+            print("Wrote script prov to " + output_json_file)
 
         # workflow results -->results dir with name script1.json
         else:
@@ -895,6 +932,7 @@ def main():
             temp = c.fetchone()
             last_script_name = temp[1]
             output_json_file = "/Users/jen/Desktop/newNow/results/workflow_" + script_name+ "_to_" + last_script_name +".json"
+            # if linking 2 python scripts, do not need to use hashtable in DDG Explorer. can use built-in link_DDGs, which adds to the result dict using internal hashes
             link_DDGs(trial_num_list, input_db_file, output_json_file, data_dir, script_name)
 
             print("Wrote workflow prov to " + output_json_file)
