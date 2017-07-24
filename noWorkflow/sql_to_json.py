@@ -1,15 +1,14 @@
-import sqlite3
-import json
-import ast
-import pandas
+import sqlite3 # querying
+import json # writing
+import ast # loop locations
+import pandas # dataframes
 import os
-from os.path import expanduser
-import subprocess
 import sys
-from io import StringIO
-import hashlib
+from io import StringIO # string dataframes from sql
+from os.path import expanduser # accessing ~/.ddg/hashtable.json
+import hashlib # generating sha1 hashes
 BUF_SIZE = 65536
-from datetime import datetime
+from datetime import datetime # timestamps
 from time import localtime
 
 def get_info_from_sql(input_db_file, run_num):
@@ -19,7 +18,7 @@ def get_info_from_sql(input_db_file, run_num):
     c = db.cursor()
 
     # process nodes
-    c.execute('SELECT trial_id, id, name, return_value, line from function_activation where trial_id = ?', (run_num,))
+    c.execute('SELECT trial_id, id, name, return_value, line from function_activation where trial_id = ?', (run_num, ))
     script_steps = c.fetchall()
 
     # file io nodes
@@ -73,6 +72,9 @@ def get_script_file(input_db_file, trial_num):
     c.execute('SELECT id, code_hash from trial where id = ?', (trial_num,))
     code_hash = c.fetchone()[1]
 
+    # noWorkflow uses first 2 characters in the hash as the directory
+    # and the rest of the chracters as the filename
+
     dir_code = code_hash[0:2]
     file_name = code_hash[2:]
 
@@ -93,9 +95,8 @@ def get_script_line_dict(path_to_file):
 
     return script_line_dict
 
-def get_defaults(script_name):
-    """ sets default required fields for the Prov-JSON file, ie environment node
-    variable 'rdt:script' is the script name or the first script in the workflow.
+def make_template(script_name):
+    """ sets default required fields/template for the Prov-JSON file
     """
     result, activity_d, environment_d = {}, {}, {}
 
@@ -152,7 +153,7 @@ def add_start_node(result, step, p_count, current_line = None):
 
     return prev_p, p_count
 
-def add_end_node(result, p_count, name):
+def add_finish_node(result, p_count, name):
     """ makes Finish node """
 
     # make node
@@ -199,7 +200,7 @@ def check_input_files_and_add(input_db_file, run_num, files, function_activation
     """ if input file not detected bc of lacking "with open() as f" format
     detect input file by using db info
     makes sure that the string is a file/path
-    if file/path: add to files dict
+    if file/path: generate sha1 hash and add to files dict
     then use add_file in make_dict """
 
     db = sqlite3.connect(input_db_file, uri=True)
@@ -276,6 +277,8 @@ def add_file_node(filename, current_link_dict, d_count, result, data_dict, activ
         start_split = data_dir.split("/")
     elif "results" in end_split:
         start_split = os.getcwd().split("/")[:-1]
+    else: # only data.csv, no other path
+        start_split = os.getcwd().split("/")
 
     total_overlap = start_split + end_split
 
@@ -292,11 +295,18 @@ def add_file_node(filename, current_link_dict, d_count, result, data_dict, activ
     # get value from the overlap with scripts dir
     i = 0
     value = ""
-    while path[i] == os.getcwd()[i]:
-        value+=path[i]
-        i+=1
+    try:
+        while path[i] == os.getcwd()[i]:
+            value+=path[i]
+            i+=1
 
-    current_file_node["rdt:value"] = "../" + path[i:]
+        current_file_node["rdt:value"] = "../" + path[i:]
+    except:
+        i=0
+        while path[i] == data_dir[i]:
+            value+=path[i]
+            i+=1
+        current_file_node["rdt:value"] = "../" + path[i:]
 
     # add file node
     dkey_string = "d" + str(d_count)
@@ -393,8 +403,7 @@ def get_data_frame(s):
 
         elif "\\" in first_line:
 
-            # TO DO
-
+            # TO DO Issue 8
             df_as_string = StringIO(s[3])
             df = pandas.read_csv(df_as_string, delim_whitespace = True, index_col = 0)
 
@@ -422,9 +431,20 @@ def get_data_frame(s):
                 y = "\n".join(y[1:])
                 df_as_string = StringIO(y)
                 df = pandas.read_csv(df_as_string, delim_whitespace = True, names = col)
+                if 0 in df.shape:
+                    # if it is a 1D array, reset type(df)= list
+                    dim = df.shape.index(0)
+                    df = []
+                    if dim == 0:
+                        for e in col:
+                            df.append(e.strip(",").strip("[").strip("]"))
+                    elif dim == 1:
+                        # TO DO: 1D array where all elements in rows instead of columns
+                        print("should look at index/rows")
+                # else, keep the df
 
         # if some sort of object, module, single integer, or non-df
-        if df.empty:
+        if isinstance(df, pandas.core.frame.DataFrame) and df.empty:
             return s[3]
 
     return df
@@ -505,6 +525,34 @@ def add_data(result, s, d_count, e_count, current_p, script_name, data_dir, to_c
 
         return d_count, e_count, dkey_string
 
+    elif isinstance(df, list):
+        # if it is a list/1D array
+        temp = {"container": "vector"}
+        temp['dimension'] = [len(df)]
+        if df[0].isnumeric():
+            temp['type'] = ["numeric"]
+        else:
+            temp['type'] = ['character']
+        current_data_node['rdt:valType'] = temp
+        current_data_node['rdt:type'] = "Snapshot"
+
+        # save the intermediate value
+        filename = "line" + str(s[4]) + "data.csv"
+        script = script_name.split("/")[-1].strip(".py")
+        directory = data_dir + "/intermediate_values_of_" + script + "_data/"
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        path = directory + filename
+
+        # write to csv
+        df = pandas.DataFrame(df)
+        df.to_csv(path, index = False, header = False)
+        current_data_node['rdt:value'] = "../data/intermediate_values_of_" + script + "_data/" + filename
+
+        dkey_string, d_count = add_data_node(result, d_count, current_data_node)
+        e_count, dkey_string = add_data_edge(e_count, current_p, current_data_node, result, dkey_string)
+        return d_count, e_count, dkey_string
+
     elif isinstance(df, str):
         # if the return value is a non df, like a string, single integer, or module
 
@@ -519,7 +567,7 @@ def add_data(result, s, d_count, e_count, current_p, script_name, data_dir, to_c
         # if the return value is None, return same d_count and e_count
         return d_count, e_count, None
 
-def get_arguments_from_sql(input_db_file, return_value, run_num, activation_id_to_p_string, lowest_process_num):
+def get_intermediate_data_dependencies_from_sql(input_db_file, return_value, run_num, activation_id_to_p_string, lowest_process_num):
     """ queries sql db to find process nodes dependent on intermediate return values
     returns the process_string of these processes """
 
@@ -540,9 +588,9 @@ def get_arguments_from_sql(input_db_file, return_value, run_num, activation_id_t
 
     return target_processes
 
-def int_data_to_process(dkey_string, process_string, e_count, result):
+def make_intermediate_data_dependencies(dkey_string, process_string, e_count, result):
     """ adds edge from intermediate data node to dependent process node
-    uses int_values, which is made by get_arguments_from_sql() """
+    uses int_values, which is made by get_intermediate_data_dependencies_from_sql() """
 
     # make edge
     current_edge_node = {}
@@ -563,7 +611,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
 
     # if first script in workflow, set up the default formats
     if len(result.keys()) == 0:
-        result = get_defaults(script_name)
+        result = make_template(script_name)
 
     # if not first script in workflow, add informs edge b/w
     # the Finish of the previous script and the Start of the current script
@@ -604,7 +652,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
                 func_name = loop_name_stack.pop()
 
                 # add the finish node and pop from the stacks
-                current_p, p_count = add_end_node(result, p_count, func_name)
+                current_p, p_count = add_finish_node(result, p_count, func_name)
                 process_stack.pop()
                 loop_stack.pop()
 
@@ -646,7 +694,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
                             lowest_process_num.append(s[1])
                             int_dkey_strings.append(dkey_string)
 
-            # dict for use in get_arguments_from_sql
+            # dict for use in get_intermediate_data_dependencies_from_sql
             activation_id_to_p_string[s[1]] = current_p
 
             # if process node reads or writes to file, add file nodes and edges
@@ -668,7 +716,6 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
                         lowest_process_num.append(s[1])
                         int_dkey_strings.append(dkey_string)
 
-            # TO DO: need this?
             if current_line != prev_process_label:
                 # add_informs_edge between all process nodes
                 e_count = add_informs_edge(result, prev_p, current_p, e_count)
@@ -680,7 +727,7 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
                 func_name = end_funcs[s[4]]
 
                 # add the finish node and pop from stacks
-                current_p, p_count = add_end_node(result, p_count, func_name)
+                current_p, p_count = add_finish_node(result, p_count, func_name)
                 process_stack.pop()
                 function_stack.pop()
 
@@ -702,21 +749,21 @@ def make_dict(script_steps, files, input_db_file, run_num, func_ends, end_funcs,
             func_name = loop_name_stack.pop()
 
         # add the finish node and edge
-        current_p, p_count = add_end_node(result, p_count, func_name)
+        current_p, p_count = add_finish_node(result, p_count, func_name)
 
         e_count = add_informs_edge(result, prev_p, current_p, e_count)
         prev_p = "p" + str(p_count-1)
 
     # add finish node and final informs edge for the script
-    current_p, p_count = add_end_node(result, p_count, script_steps[0][2])
+    current_p, p_count = add_finish_node(result, p_count, script_steps[0][2])
     e_count = add_informs_edge(result, prev_p, current_p, e_count)
 
     # adds used edges using dependencies from database table: object_value
     for i in range (0, len(int_values)):
         return_value = int_values[i]
-        target_processes = get_arguments_from_sql(input_db_file, return_value, run_num, activation_id_to_p_string, lowest_process_num[i])
+        target_processes = get_intermediate_data_dependencies_from_sql(input_db_file, return_value, run_num, activation_id_to_p_string, lowest_process_num[i])
         for process in target_processes:
-            e_count = int_data_to_process(int_dkey_strings[i], process, e_count, result)
+            e_count = make_intermediate_data_dependencies(int_dkey_strings[i], process, e_count, result)
 
     # return current values for next script in workflow
     return result, p_count, d_count, e_count, outfiles, current_p, files
@@ -754,12 +801,16 @@ def add_default_hash_node(current_entry, isRead, script_name, ddg_path, end_of_f
     current_entry['ScriptPath'] = script_name
     current_entry['DDGPath'] = ddg_path
 
-    # # use overlap of paths to get the full, non relative file path
+    # use overlap of paths to get the full, non relative file path
     i=0
     start_of_file_path = ""
     while script_name[i] == ddg_path[i]:
         start_of_file_path+=script_name[i]
         i+=1
+
+    # if writing to the same (scripts) dir, set start_of_file_path to scripts_dir
+    if len(end_of_file_path.split("/"))==1:
+        start_of_file_path = "/".join(script_name.split("/")[:-1])
 
     total_overlap = start_of_file_path.split("/") + end_of_file_path.split("/")
 
@@ -823,10 +874,14 @@ def write_to_hashtable(files, outfiles, script_name, ddg_path):
             except: # if file exists but is empty initialize
                 existing_entries = []
 
+            to_remove = []
             # if the script is run again, remove old entries before adding new ones
             for existing_e in existing_entries:
                 if existing_e['DDGPath']==ddg_path:
-                    existing_entries.remove(existing_e)
+                    to_remove.append(existing_e)
+
+            for e in to_remove:
+                existing_entries.remove(e)
 
             for new_e in new_entries:
                 existing_entries.append(new_e)
